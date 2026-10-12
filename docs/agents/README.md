@@ -108,7 +108,7 @@ just the top-level status:
 
 | Status / field | Agent response |
 | --- | --- |
-| `queued` or `running` | Work is pending. Poll at reasonable intervals; avoid tight loops. |
+| `queued` or `running` | Work is pending. A queued GitHub job with `result.retryAt` is waiting for the provider quota reset. Poll at reasonable intervals; avoid tight loops. |
 | `waiting-budget` | Free browser budget is exhausted. Report the deferral; recovery resumes on a later UTC day. |
 | `failed` | Report `failureReason` and, when present, `failureDetail` (GitHub operation/status/retry timing). Session/account failures require owner attention; do not repeatedly retry login. |
 | `completed` with `result.partial` | A bounded fetch finished, but source coverage is incomplete. |

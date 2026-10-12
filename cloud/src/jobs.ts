@@ -207,14 +207,16 @@ export async function processMessage(
 		status: string,
 		state: State,
 		result: Record<string, unknown>,
+		notBefore = 0,
 	) =>
 		env.DB.prepare(
-			"UPDATE jobs SET status=?,state_json=?,result_json=?,lease_owner=NULL,lease_until=0,updated_at=? WHERE id=? AND lease_owner=?",
+			"UPDATE jobs SET status=?,state_json=?,result_json=?,lease_owner=NULL,lease_until=?,updated_at=? WHERE id=? AND lease_owner=?",
 		)
 			.bind(
 				status,
 				JSON.stringify(state),
 				JSON.stringify(result),
+				notBefore,
 				new Date().toISOString(),
 				job.id,
 				owner,
@@ -323,6 +325,32 @@ export async function processMessage(
 			message.ack();
 			return;
 		}
+		if (error instanceof GithubRequestError && error.reason === "rate-limit") {
+			const reset = error.retryAt
+				? Date.parse(error.retryAt)
+				: Date.now() + 3600000;
+			const delaySeconds = Math.max(
+				60,
+				Math.min(43200, Math.ceil((reset - Date.now()) / 1000) + 5),
+			);
+			const notBefore = Date.now() + delaySeconds * 1000;
+			await save(
+				"queued",
+				state,
+				{
+					...result,
+					partial: true,
+					failureReason: failureReason(error),
+					failureDetail: error.diagnostic(),
+					retryAt: new Date(notBefore).toISOString(),
+				},
+				notBefore,
+			);
+			await env.JOBS.send({ jobId: job.id }, { delaySeconds });
+			message.ack();
+			return;
+		}
+
 		const permanent = [
 			"source-account-mismatch",
 			"source-session-missing",
@@ -361,9 +389,9 @@ export async function recoverJobs(env: Env) {
 		.bind(Date.now(), today)
 		.run();
 	const jobs = await env.DB.prepare(
-		"SELECT id FROM jobs WHERE status='queued' AND updated_at<? LIMIT 10",
+		"SELECT id FROM jobs WHERE status='queued' AND updated_at<? AND lease_until<=? LIMIT 10",
 	)
-		.bind(new Date(Date.now() - 300000).toISOString())
+		.bind(new Date(Date.now() - 300000).toISOString(), Date.now())
 		.all<{ id: string }>();
 	await Promise.all(
 		jobs.results.map((job) => env.JOBS.send({ jobId: job.id })),

@@ -23,6 +23,7 @@ import {
 	processMessage,
 	jobStatus,
 	failureReason,
+	recoverJobs,
 	queueImport,
 } from "../src/jobs";
 
@@ -517,12 +518,19 @@ test("an actual MCP client discovers tools, searches and reads evidence", async 
 
 test("GitHub quota failures retain actionable diagnostics without response secrets", async () => {
 	const original = globalThis.fetch;
+	const send = env.JOBS.send;
+	const dispatched: Array<{ jobId: string; delaySeconds?: number }> = [];
+	env.JOBS.send = async (body, options) => {
+		dispatched.push({ jobId: body.jobId, delaySeconds: options?.delaySeconds });
+		return send(body, options);
+	};
+	const reset = Math.floor(Date.now() / 1000) + 3600;
 	globalThis.fetch = async () =>
 		new Response("private response body", {
 			status: 403,
 			headers: {
 				"x-ratelimit-remaining": "0",
-				"x-ratelimit-reset": "1791800000",
+				"x-ratelimit-reset": String(reset),
 				Authorization: "Bearer secret-value",
 			},
 		});
@@ -539,7 +547,7 @@ test("GitHub quota failures retain actionable diagnostics without response secre
 		} as unknown as Message<{ jobId: string }>);
 		const stored = await jobStatus(env, job.id);
 		assert.equal(acknowledged, true);
-		assert.equal(stored?.status, "failed");
+		assert.equal(stored?.status, "queued");
 		assert.equal(stored?.result.partial, true);
 		assert.equal(stored?.result.failureReason, "github-stars-rate-limit-403");
 		assert.deepEqual(stored?.result.failureDetail, {
@@ -547,14 +555,29 @@ test("GitHub quota failures retain actionable diagnostics without response secre
 			operation: "stars",
 			reason: "rate-limit",
 			status: 403,
-			retryAt: new Date(1791800000000).toISOString(),
+			retryAt: new Date(reset * 1000).toISOString(),
 		});
+		assert.ok(
+			dispatched.some(
+				(item) => item.jobId === job.id && (item.delaySeconds ?? 0) >= 3590,
+			),
+		);
+		const count = dispatched.filter((item) => item.jobId === job.id).length;
+		await env.DB.prepare("UPDATE jobs SET updated_at=? WHERE id=?")
+			.bind("2026-01-01T00:00:00Z", job.id)
+			.run();
+		await recoverJobs(env);
+		assert.equal(
+			dispatched.filter((item) => item.jobId === job.id).length,
+			count,
+		);
 		assert.doesNotMatch(
 			JSON.stringify(stored),
 			/secret-value|private response body|Authorization/,
 		);
 	} finally {
 		globalThis.fetch = original;
+		env.JOBS.send = send;
 	}
 });
 
