@@ -110,7 +110,7 @@ just the top-level status:
 | --- | --- |
 | `queued` or `running` | Work is pending. Poll at reasonable intervals; avoid tight loops. |
 | `waiting-budget` | Free browser budget is exhausted. Report the deferral; recovery resumes on a later UTC day. |
-| `failed` | Report the diagnostic. Session/account failures require owner attention; do not repeatedly retry login. |
+| `failed` | Report `failureReason` and, when present, `failureDetail` (GitHub operation/status/retry timing). Session/account failures require owner attention; do not repeatedly retry login. |
 | `completed` with `result.partial` | A bounded fetch finished, but source coverage is incomplete. |
 | `result.importJob` | Poll this job too; fetched documents still need ingestion. |
 | `dispatchPending` | Data/job is durable but dispatch needs recovery; do not claim completion. |

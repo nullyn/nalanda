@@ -514,3 +514,87 @@ test("an actual MCP client discovers tools, searches and reads evidence", async 
 		await client.close();
 	}
 });
+
+test("GitHub quota failures retain actionable diagnostics without response secrets", async () => {
+	const original = globalThis.fetch;
+	globalThis.fetch = async () =>
+		new Response("private response body", {
+			status: 403,
+			headers: {
+				"x-ratelimit-remaining": "0",
+				"x-ratelimit-reset": "1791800000",
+				Authorization: "Bearer secret-value",
+			},
+		});
+	try {
+		const job = await startJob(env, "github");
+		let acknowledged = false;
+		await processMessage({ ...env, GITHUB_ACCOUNT: "alice" }, {
+			body: { jobId: job.id },
+			attempts: 3,
+			ack: () => {
+				acknowledged = true;
+			},
+			retry: () => assert.fail("final attempt must finish"),
+		} as unknown as Message<{ jobId: string }>);
+		const stored = await jobStatus(env, job.id);
+		assert.equal(acknowledged, true);
+		assert.equal(stored?.status, "failed");
+		assert.equal(stored?.result.partial, true);
+		assert.equal(stored?.result.failureReason, "github-stars-rate-limit-403");
+		assert.deepEqual(stored?.result.failureDetail, {
+			provider: "github",
+			operation: "stars",
+			reason: "rate-limit",
+			status: 403,
+			retryAt: new Date(1791800000000).toISOString(),
+		});
+		assert.doesNotMatch(
+			JSON.stringify(stored),
+			/secret-value|private response body|Authorization/,
+		);
+	} finally {
+		globalThis.fetch = original;
+	}
+});
+
+test("GitHub errors distinguish invalid stars, network failures and README HTTP failures", async () => {
+	const original = globalThis.fetch;
+	try {
+		globalThis.fetch = async () => new Response("invalid-json");
+		await assert.rejects(
+			captureGithub({ ...env, GITHUB_ACCOUNT: "alice" }, {}),
+			(error) => failureReason(error) === "github-stars-invalid-response",
+		);
+		globalThis.fetch = async () => {
+			throw new Error("private URL or credentials");
+		};
+		await assert.rejects(
+			captureGithub({ ...env, GITHUB_ACCOUNT: "alice" }, {}),
+			(error) => failureReason(error) === "github-stars-network",
+		);
+		globalThis.fetch = async (input) =>
+			String(input).includes("/starred?")
+				? Response.json([
+						{
+							starred_at: "2026-10-12T00:00:00Z",
+							repo: {
+								node_id: "readme-http-failure",
+								full_name: "alice/demo",
+								description: "Demo",
+								topics: [],
+								html_url: "https://github.com/alice/demo",
+								pushed_at: "2026-10-12T00:00:00Z",
+								created_at: "2026-01-01T00:00:00Z",
+							},
+						},
+					])
+				: new Response("private body", { status: 503 });
+		await assert.rejects(
+			captureGithub({ ...env, GITHUB_ACCOUNT: "alice" }, {}),
+			(error) => failureReason(error) === "github-readme-http-503",
+		);
+	} finally {
+		globalThis.fetch = original;
+	}
+});

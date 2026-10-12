@@ -1,3 +1,5 @@
+import { verifyInstagramAccount } from "../../src/lib/instagram-account";
+import { GithubRequestError } from "./source-errors";
 import { parseBrowserBookmarks } from "../../src/lib/bookmarks-parser";
 import { readStandalonePostDom } from "../../src/lib/instagram-post-dom";
 import type { Env } from "./env";
@@ -205,17 +207,7 @@ export async function captureInstagram(
 			waitUntil: "domcontentloaded",
 			timeout: 20000,
 		});
-		const profile = page.getByRole("link", { name: "Profile", exact: true });
-		await profile.first().waitFor();
-		const own = await profile.first().evaluate((link) => ({
-			href: link.getAttribute("href"),
-			outsideMain: !link.closest("main"),
-		}));
-		if (
-			!own.outsideMain ||
-			own.href?.replace(/^\/+|\/+$/g, "").toLowerCase() !== account
-		)
-			throw new Error("Instagram account mismatch");
+		await verifyInstagramAccount(page, account);
 		let urls = state.urls;
 		if (!urls) {
 			await page
@@ -367,18 +359,41 @@ export async function captureInstagram(
 		};
 	});
 }
-async function githubJson(path: string) {
-	const response = await fetch(`https://api.github.com/${path}`, {
-		headers: {
-			Accept: "application/vnd.github.star+json",
-			"User-Agent": "Nalanda",
-		},
-		signal: AbortSignal.timeout(15000),
-	});
-	if (!response.ok)
-		throw new Error("GitHub request failed or its free rate limit was reached");
-	return response.json();
+async function githubFetch(path: string, operation: "stars" | "readme") {
+	let response: Response;
+	try {
+		response = await fetch(`https://api.github.com/${path}`, {
+			headers: {
+				Accept:
+					operation === "stars"
+						? "application/vnd.github.star+json"
+						: "application/vnd.github.raw+json",
+				"User-Agent": "Nalanda",
+			},
+			signal: AbortSignal.timeout(15000),
+		});
+	} catch (error) {
+		throw new GithubRequestError(
+			operation,
+			error instanceof Error &&
+				["TimeoutError", "AbortError"].includes(error.name)
+				? "timeout"
+				: "network",
+		);
+	}
+	if (!response.ok && !(operation === "readme" && response.status === 404))
+		throw GithubRequestError.fromResponse(operation, response);
+	return response;
 }
+async function githubJson(path: string) {
+	const response = await githubFetch(path, "stars");
+	try {
+		return await response.json();
+	} catch {
+		throw new GithubRequestError("stars", "invalid-response");
+	}
+}
+
 async function boundedReadme(response: Response): Promise<string | null> {
 	const reader = response.body?.getReader();
 	if (!reader) return "";
@@ -426,7 +441,8 @@ export async function captureGithub(
 			created_at: string;
 		};
 	}>;
-	if (!Array.isArray(stars)) throw new Error("Invalid GitHub stars response");
+	if (!Array.isArray(stars))
+		throw new GithubRequestError("stars", "invalid-response");
 	const documents: Document[] = [];
 	const warnings: string[] = [];
 	for (const { repo, starred_at } of stars) {
@@ -442,25 +458,15 @@ export async function captureGithub(
 				: null;
 		if (!old || old.metadata?.pushedAt !== repo.pushed_at || !readme) {
 			readmeWarning = null;
-			const response = await fetch(
-				`https://api.github.com/repos/${repo.full_name}/readme`,
-				{
-					headers: {
-						Accept: "application/vnd.github.raw+json",
-						"User-Agent": "Nalanda",
-					},
-					signal: AbortSignal.timeout(15000),
-				},
+			const response = await githubFetch(
+				`repos/${repo.full_name}/readme`,
+				"readme",
 			);
 			if (response.ok) {
 				const captured = await boundedReadme(response);
 				if (captured === null)
 					readmeWarning = `README exceeds 1 MiB for ${repo.full_name}; prior captured README retained when available`;
 				else readme = captured;
-			} else if (response.status !== 404) {
-				throw new Error(
-					"GitHub README fetch failed; captured archive retained",
-				);
 			} else readmeWarning = `README unavailable for ${repo.full_name}`;
 		}
 		if (readmeWarning) warnings.push(readmeWarning);

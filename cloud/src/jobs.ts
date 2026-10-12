@@ -1,3 +1,4 @@
+import { GithubRequestError } from "./source-errors";
 import type { Env } from "./env";
 import { indexBatch, storeDocument, type Document } from "./library";
 import {
@@ -21,6 +22,8 @@ interface Job {
 	lease_until: number;
 }
 export function failureReason(error: unknown) {
+	if (error instanceof GithubRequestError)
+		return `github-${error.operation}-${error.reason}${error.status ? `-${error.status}` : ""}`;
 	const message = error instanceof Error ? error.message : "";
 	if (/Browser time limit exceeded for today/i.test(message))
 		return "browser-daily-budget";
@@ -28,7 +31,10 @@ export function failureReason(error: unknown) {
 		/Unable to create new browser: code: (\d{3})/,
 	)?.[1];
 	if (status) return `browser-provider-${status}`;
-	if (/account mismatch/.test(message)) return "source-account-mismatch";
+	if (
+		/account mismatch|signed in to a different Instagram account/.test(message)
+	)
+		return "source-account-mismatch";
 	if (/Timeout|timeout|timed out/i.test(message)) {
 		const operation = message.match(
 			/(page\.goto|page\.waitForResponse|locator\.waitFor|locator\.click|page\.waitForURL)/,
@@ -327,6 +333,10 @@ export async function processMessage(
 			{
 				...result,
 				failureReason: failureReason(error),
+				...(error instanceof GithubRequestError
+					? { failureDetail: error.diagnostic() }
+					: {}),
+				partial: true,
 				error:
 					"Source or index step failed; existing archive retained. Check session expiry and free quotas.",
 			},
