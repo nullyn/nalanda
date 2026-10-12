@@ -2,6 +2,8 @@
 
 Nalanda syncs X bookmarks, the Instagram AI collection, and GitHub stars into a searchable knowledge library. The current deployment exposes an authenticated **cloud MCP**, with Cloudflare D1, keyword search and 512-dimensional EmbeddingGemma 300M semantic search. Calling agents can search, request hydration, read evidence and supply inferred tags or summaries without a separate paid inference API.
 
+**Explore the architecture:** [interactive Cloudflare learning guide](docs/learn/nalanda-cloudflare.html) (download and open the HTML in a browser).
+
 **Agents: start with [the agent quick-start README](docs/agents/README.md).** For hosting and deployment, see [cloud/README.md](cloud/README.md).
 
 The repository also retains the local SQLite/JSON CLI and inherited [Birdclaw](https://github.com/steipete/birdclaw) features by [@steipete](https://github.com/steipete/). The local features described below are separate from the cloud MCP; the cloud saved-content pipeline does not store media or require a local server. See [the Nalanda design](docs/nalanda.md) for local implementation details.
