@@ -23,7 +23,7 @@ export async function checkInstagramSession(
 	if (
 		/\/accounts\/login(\/|$)/.test(path) ||
 		(await page
-			.locator('input[name="password"]')
+			.locator('input[type="password"],input[name="password"]')
 			.first()
 			.isVisible()
 			.catch(() => false))
@@ -44,6 +44,18 @@ export async function instagramStep<T>(
 		if (error instanceof InstagramCaptureError) throw error;
 		await checkInstagramSession(page, stage);
 		const message = error instanceof Error ? error.message : "";
+		const signals = await page
+			.evaluate(() => ({
+				profileImages: document.querySelectorAll(
+					'a img[alt*="profile picture" i]',
+				).length,
+				loginLinks: document.querySelectorAll('a[href*="/accounts/login"]')
+					.length,
+				passwordFields: document.querySelectorAll('input[type="password"]')
+					.length,
+				links: document.querySelectorAll("a[href]").length,
+			}))
+			.catch(() => undefined);
 		throw new InstagramCaptureError(
 			stage,
 			/signed in to a different Instagram account|account mismatch/i.test(
@@ -53,6 +65,7 @@ export async function instagramStep<T>(
 				: /Timeout|timed out/i.test(message)
 					? "ui-timeout"
 					: "browser-step-failed",
+			signals,
 		);
 	}
 }

@@ -57,7 +57,7 @@ test("login and checkpoint pages report explicit renewal requirements without pa
 		["/challenge/abc/", "challenge"],
 	]) {
 		const page = await fixture(
-			'<input name="password" value="do-not-log">',
+			'<input type="password" name="pass" value="do-not-log">',
 			path,
 		);
 		try {
@@ -91,6 +91,35 @@ test("current profile-picture navigation verifies the account and rejects a diff
 			(error) =>
 				error instanceof InstagramCaptureError &&
 				error.reason === "account-mismatch",
+		);
+	} finally {
+		await page.close();
+	}
+});
+
+test("UI failure diagnostics count page elements without retaining content", async () => {
+	const page = await fixture(
+		'<a href="/accounts/login/">Log in</a><p>Private caption must not be retained</p>',
+	);
+	try {
+		await assert.rejects(
+			instagramStep(page, "verify-account", async () => {
+				throw new Error("Timeout with private cookie");
+			}),
+			(error) => {
+				assert.ok(error instanceof InstagramCaptureError);
+				assert.deepEqual(error.diagnostic().signals, {
+					profileImages: 0,
+					loginLinks: 1,
+					passwordFields: 0,
+					links: 1,
+				});
+				assert.doesNotMatch(
+					JSON.stringify(error.diagnostic()),
+					/Private caption|private cookie/,
+				);
+				return true;
+			},
 		);
 	} finally {
 		await page.close();

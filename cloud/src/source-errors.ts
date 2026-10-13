@@ -69,6 +69,12 @@ export class InstagramCaptureError extends Error {
 	constructor(
 		readonly stage: InstagramStage,
 		readonly reason: InstagramFailure,
+		readonly signals?: {
+			profileImages: number;
+			loginLinks: number;
+			passwordFields: number;
+			links: number;
+		},
 	) {
 		super(`Instagram ${stage}: ${reason}`);
 	}
@@ -77,6 +83,7 @@ export class InstagramCaptureError extends Error {
 			provider: "instagram",
 			stage: this.stage,
 			reason: this.reason,
+			signals: this.signals,
 			sessionRenewalRequired: [
 				"session-required",
 				"challenge",
