@@ -13,8 +13,10 @@ remains intact. Cloud Chromium previously synced X and Instagram to that archive
 Worker-based X hydration is deferred after the account's free browser allowance
 was consumed during testing. Following an Instagram account security alert, the
 old cloud session was removed and replaced after the user signed in again locally.
-Instagram refresh is configured again, with a bounded validation job queued;
-successful Worker-based Instagram fetching remains unverified. Captured Instagram
+Best-effort Instagram refresh is deployed with stage diagnostics and durable
+backlog processing. The October 13 live test detected a login screen during account
+verification and stopped for session renewal; successful Worker-based Instagram
+fetching remains unverified. Captured Instagram
 content remains searchable.
 
 Cloud embeddings use `@cf/google/embeddinggemma-300m`: the Gemma 3-based model,
