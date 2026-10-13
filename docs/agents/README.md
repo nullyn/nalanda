@@ -122,15 +122,21 @@ that every saved item on the source platform was discovered. `nalanda_index` wit
 
 Hydration runs daily at **01:15 UTC / 06:45 IST**, with recovery every ten minutes.
 The cloud continues without the owner's Mac. X uses incremental page checkpoints;
-page caps report partial coverage. Instagram currently scans loaded collection
-links and **does not implement complete collection pagination**. GitHub refresh
+page caps report partial coverage. Instagram performs bounded scrolling, skips known items and preserves discovered
+pending links across runs. **It still does not guarantee complete collection
+pagination or discovery.** GitHub refresh
 uses the free public API; private repository refresh needs separate authorization.
 Unsave/unstar never deletes captured archive content.
 
 Browser quotas are shared with other activity in the Cloudflare account. A new
 Chrome login can renew cookies but does not prove that a cloud browser will be
 accepted by Instagram or X. On security alerts, stop affected-source automation
-and involve the owner. Never change passwords, evade challenges, or upgrade to a
+and involve the owner. Instagram login/challenge/account failures report
+`failureDetail.sessionRenewalRequired` and stay stopped, including daily cron.
+After the owner signs in and authorized cookies are refreshed, request
+`nalanda_sync` with `source: "instagram"` and `sessionRenewed: true`; that flag
+only releases the stopped job and does not refresh credentials itself. No export
+import fallback is required. Never change passwords, evade challenges, or upgrade to a
 paid plan to make hydration work.
 
 ## Enrich with your own model

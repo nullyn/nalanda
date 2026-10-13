@@ -143,6 +143,7 @@ export function createServer(env: Env) {
 				source,
 				maxPages: z.number().int().min(1).max(50).default(5),
 				maxItems: z.number().int().min(1).max(50).default(10),
+				sessionRenewed: z.boolean().default(false),
 			}),
 			annotations: {
 				readOnlyHint: false,
@@ -150,8 +151,10 @@ export function createServer(env: Env) {
 				idempotentHint: true,
 			},
 		},
-		async ({ source, maxPages, maxItems }) =>
-			result(await startJob(env, source, { maxPages, maxItems })),
+		async ({ source, maxPages, maxItems, sessionRenewed }) =>
+			result(
+				await startJob(env, source, { maxPages, maxItems }, sessionRenewed),
+			),
 	);
 	server.registerTool(
 		"nalanda_sync_status",

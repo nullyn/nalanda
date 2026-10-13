@@ -51,3 +51,37 @@ export class GithubRequestError extends Error {
 		};
 	}
 }
+
+export type InstagramStage =
+	| "open-saved"
+	| "verify-account"
+	| "open-collection"
+	| "discover-posts"
+	| "read-post";
+export type InstagramFailure =
+	| "session-required"
+	| "challenge"
+	| "account-mismatch"
+	| "ui-timeout"
+	| "collection-unavailable"
+	| "browser-step-failed";
+export class InstagramCaptureError extends Error {
+	constructor(
+		readonly stage: InstagramStage,
+		readonly reason: InstagramFailure,
+	) {
+		super(`Instagram ${stage}: ${reason}`);
+	}
+	diagnostic() {
+		return {
+			provider: "instagram",
+			stage: this.stage,
+			reason: this.reason,
+			sessionRenewalRequired: [
+				"session-required",
+				"challenge",
+				"account-mismatch",
+			].includes(this.reason),
+		};
+	}
+}

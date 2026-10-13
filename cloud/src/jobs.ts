@@ -1,4 +1,4 @@
-import { GithubRequestError } from "./source-errors";
+import { GithubRequestError, InstagramCaptureError } from "./source-errors";
 import type { Env } from "./env";
 import { indexBatch, storeDocument, type Document } from "./library";
 import {
@@ -22,6 +22,8 @@ interface Job {
 	lease_until: number;
 }
 export function failureReason(error: unknown) {
+	if (error instanceof InstagramCaptureError)
+		return `instagram-${error.stage}-${error.reason}`;
 	if (error instanceof GithubRequestError)
 		return `github-${error.operation}-${error.reason}${error.status ? `-${error.status}` : ""}`;
 	const message = error instanceof Error ? error.message : "";
@@ -51,6 +53,7 @@ export async function startJob(
 	env: Env,
 	source: JobSource,
 	limits = { maxPages: 5, maxItems: 10 },
+	sessionRenewed = false,
 ) {
 	const now = new Date().toISOString();
 	const id = crypto.randomUUID();
@@ -65,6 +68,27 @@ export async function startJob(
 	const oldResult = previous
 		? (JSON.parse(previous.result_json) as Record<string, unknown>)
 		: undefined;
+	if (
+		source === "instagram" &&
+		previous?.status === "failed" &&
+		!sessionRenewed
+	) {
+		const detail = oldResult?.failureDetail;
+		if (
+			detail &&
+			typeof detail === "object" &&
+			"sessionRenewalRequired" in detail &&
+			detail.sessionRenewalRequired === true
+		)
+			return {
+				id: previous.id,
+				status: "failed",
+				reused: true,
+				dispatchPending: false,
+				sessionRenewalRequired: true,
+			};
+	}
+
 	let state: State = { ...limits };
 	let resumedFrom: string | undefined;
 	if (
@@ -88,16 +112,20 @@ export async function startJob(
 		resumedFrom = previous?.id;
 	} else if (
 		source === "instagram" &&
-		previous?.status === "failed" &&
 		oldState?.urls &&
 		(oldState.offset ?? 0) < oldState.urls.length
 	) {
 		state = {
 			...limits,
-			urls: oldState.urls.slice(0, (oldState.offset ?? 0) + limits.maxItems),
+			urls: oldState.urls,
+			endOffset: Math.min(
+				oldState.urls.length,
+				(oldState.offset ?? 0) + limits.maxItems,
+			),
+			collectionUrl: oldState.collectionUrl,
 			offset: oldState.offset,
 		};
-		resumedFrom = previous.id;
+		resumedFrom = previous?.id;
 	}
 	await env.DB.prepare(
 		"INSERT OR IGNORE INTO jobs(id,source,status,state_json,result_json,created_at,updated_at) VALUES(?,?,'queued',?,?,?,?)",
@@ -269,7 +297,7 @@ export async function processMessage(
 				job.source === "x"
 					? await captureX(env, state)
 					: job.source === "instagram"
-						? await captureInstagram(env, state, state.maxItems)
+						? await captureInstagram(env, state, state.maxItems, state.maxPages)
 						: await captureGithub(env, state);
 			const ids = JSON.stringify(capture.documents.map((doc) => doc.id));
 			const known = await env.DB.prepare(
@@ -286,6 +314,7 @@ export async function processMessage(
 			result.captured = Number(result.captured ?? 0) + capture.documents.length;
 			result.accepted = Number(result.accepted ?? 0) + capture.documents.length;
 			result.partial = Boolean(result.partial) || capture.partial;
+			if (capture.coverage) result.coverage = capture.coverage;
 			result.warnings = [
 				...(Array.isArray(result.warnings) ? result.warnings : []),
 				...capture.warnings,
@@ -351,17 +380,20 @@ export async function processMessage(
 			return;
 		}
 
-		const permanent = [
-			"source-account-mismatch",
-			"source-session-missing",
-		].includes(failureReason(error));
+		const permanent =
+			["source-account-mismatch", "source-session-missing"].includes(
+				failureReason(error),
+			) ||
+			(error instanceof InstagramCaptureError &&
+				error.diagnostic().sessionRenewalRequired);
 		await save(
 			permanent || message.attempts >= 3 ? "failed" : "queued",
 			state,
 			{
 				...result,
 				failureReason: failureReason(error),
-				...(error instanceof GithubRequestError
+				...(error instanceof GithubRequestError ||
+				error instanceof InstagramCaptureError
 					? { failureDetail: error.diagnostic() }
 					: {}),
 				partial: true,

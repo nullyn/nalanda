@@ -1,3 +1,9 @@
+import {
+	instagramStep,
+	findInstagramCollection,
+	discoverInstagramPosts,
+	instagramPostUrl,
+} from "./instagram-browser";
 import { verifyInstagramAccount } from "../../src/lib/instagram-account";
 import { GithubRequestError } from "./source-errors";
 import { parseBrowserBookmarks } from "../../src/lib/bookmarks-parser";
@@ -10,6 +16,8 @@ export interface SourceState {
 	urls?: string[];
 	page?: number;
 	offset?: number;
+	endOffset?: number;
+	collectionUrl?: string;
 }
 export interface Capture {
 	documents: Document[];
@@ -17,6 +25,11 @@ export interface Capture {
 	more: boolean;
 	partial: boolean;
 	warnings: string[];
+	coverage?: {
+		kind: "instagram-bounded";
+		discoveredBacklog: number;
+		remainingItems: number;
+	};
 }
 function identity(source: string, account: string, id: string) {
 	return JSON.stringify([source, account, id]);
@@ -200,160 +213,218 @@ export async function captureInstagram(
 	env: Env,
 	state: SourceState,
 	maxItems: number,
+	maxPages = 5,
 ): Promise<Capture> {
 	const account = handle(env.INSTAGRAM_ACCOUNT);
 	return withBrowser(env, "instagram", async (page, context) => {
-		await page.goto(`https://www.instagram.com/${account}/saved/`, {
-			waitUntil: "domcontentloaded",
-			timeout: 20000,
-		});
-		await verifyInstagramAccount(page, account);
+		await instagramStep(page, "open-saved", () =>
+			page.goto(`https://www.instagram.com/${account}/saved/`, {
+				waitUntil: "domcontentloaded",
+				timeout: 15000,
+			}),
+		);
+		await instagramStep(page, "verify-account", () =>
+			verifyInstagramAccount(page, account),
+		);
 		let urls = state.urls;
 		if (!urls) {
-			await page
-				.getByText(env.INSTAGRAM_COLLECTION, { exact: true })
-				.first()
-				.click();
-			await page.waitForURL(new RegExp(`/${account}/saved/[^/]+/[^/]+/`));
-			await page.locator('a[href*="/p/"],a[href*="/reel/"]').first().waitFor();
-			urls = [
-				...new Set(
-					await page
-						.locator('a[href*="/p/"],a[href*="/reel/"]')
-						.evaluateAll((links) =>
-							links.map((link) => (link as HTMLAnchorElement).href),
-						),
-				),
-			]
-				.filter((url) => {
-					const u = new URL(url);
-					return (
-						u.hostname === "www.instagram.com" &&
-						/^\/(?:[^/]+\/)?(?:p|reel)\/[A-Za-z0-9_-]+\/?$/.test(u.pathname)
+			const collectionUrl = await instagramStep(
+				page,
+				"open-collection",
+				async () => {
+					const href = await findInstagramCollection(
+						page,
+						account,
+						env.INSTAGRAM_COLLECTION,
 					);
-				})
-				.slice(0, maxItems);
+					await page.goto(href, {
+						waitUntil: "domcontentloaded",
+						timeout: 10000,
+					});
+					return href;
+				},
+			);
+			urls = await instagramStep(page, "discover-posts", () =>
+				discoverInstagramPosts(page, maxPages),
+			);
+			const identities = JSON.stringify(
+				urls.map((url) =>
+					identity(
+						"instagram",
+						account,
+						new URL(url).pathname.split("/").filter(Boolean).at(-1)!,
+					),
+				),
+			);
+			const known = await env.DB.prepare(
+				"SELECT id FROM documents WHERE id IN (SELECT value FROM json_each(?)) UNION SELECT id FROM import_staging WHERE id IN (SELECT value FROM json_each(?))",
+			)
+				.bind(identities, identities)
+				.all<{ id: string }>();
+			const knownIds = new Set(known.results.map((row) => row.id));
+			urls = urls.filter(
+				(url) =>
+					!knownIds.has(
+						identity(
+							"instagram",
+							account,
+							new URL(url).pathname.split("/").filter(Boolean).at(-1)!,
+						),
+					),
+			);
+			Object.assign(state, {
+				urls,
+				offset: 0,
+				endOffset: Math.min(urls.length, maxItems),
+				collectionUrl,
+			});
 		}
+		urls = urls
+			.map((url) => instagramPostUrl(url))
+			.filter((url): url is string => Boolean(url));
+
 		const documents: Document[] = [];
-		const warnings: string[] = [];
+		const warnings: string[] = [
+			"Bounded collection discovery; full Instagram collection coverage is unverified",
+		];
+		if (!urls.length)
+			warnings.push(
+				"No uncaptured posts were discovered; collection loading or coverage may be incomplete",
+			);
 		const offset = state.offset ?? 0;
-		for (const url of urls.slice(offset, offset + 2)) {
+		const endOffset =
+			state.endOffset ?? Math.min(urls.length, offset + maxItems);
+		for (const url of urls.slice(offset, Math.min(offset + 1, endOffset))) {
 			const post = await context.newPage();
 			try {
-				await post.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-				await post
-					.locator("main time[datetime],article h1")
-					.first()
-					.waitFor({ timeout: 5000 })
-					.catch(() => undefined);
-				const metadata =
-					(await post
-						.locator('meta[property="og:description"]')
-						.getAttribute("content")
-						.catch(() => null)) ?? "";
-				const author = await post
-					.locator('main a[href^="/"]')
-					.evaluateAll(
-						(links) =>
-							links
-								.map((link) =>
-									link.getAttribute("href")?.split("/").filter(Boolean),
-								)
-								.find(
-									(parts) =>
-										parts?.length === 1 &&
-										!["explore", "accounts", "reels"].includes(parts[0]!),
-								)?.[0] ?? "",
+				await instagramStep(post, "read-post", async () => {
+					await instagramStep(post, "read-post", () =>
+						post.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }),
 					);
-				const extracted = await post.evaluate(readStandalonePostDom, {
-					author,
-					origin: "https://www.instagram.com",
-				});
-				const caption =
-					extracted.caption ||
-					metadata.match(/:\s*["“]([\s\S]*)[”"]\s*$/u)?.[1] ||
-					"";
-				if (!caption) {
-					warnings.push("A post did not supply a readable caption");
-					continue;
-				}
-				const externalId = new URL(url).pathname
-					.split("/")
-					.filter(Boolean)
-					.at(-1)!;
-				const now = new Date().toISOString();
-				const existing = await readDocument(
-					env,
-					identity("instagram", account, externalId),
-				);
-				const old = existing?.metadata;
-				const visible = Boolean(extracted.caption);
-				const finalCaption =
-					!visible && old?.captionSource === "visible-caption-span"
-						? String(old.caption)
-						: caption;
-				const links = [
-					...new Set([
-						...(Array.isArray(old?.authorLinks)
-							? (old.authorLinks as string[])
-							: []),
-						...extracted.links,
-					]),
-				];
-				const comments = [
-					...new Set([
-						...(Array.isArray(old?.authorComments)
-							? old.authorComments.filter(
-									(v): v is string => typeof v === "string",
-								)
-							: []),
-						...extracted.comments,
-					]),
-				];
-				const text = [
-					finalCaption,
-					...comments,
-					links.length ? `Author links: ${links.join("\n")}` : "",
-				]
-					.filter(Boolean)
-					.join("\n\n");
-				documents.push({
-					id: identity("instagram", account, externalId),
-					source: "instagram",
-					account,
-					externalId,
-					url,
-					title: text.slice(0, 180),
-					author,
-					text,
-					publishedAt: extracted.publishedAt || existing?.publishedAt || null,
-					publishedAtSource: extracted.publishedAt
-						? "time-element"
-						: (existing?.publishedAtSource ?? null),
-					savedAt: existing?.savedAt ?? now,
-					savedAtSource: existing?.savedAtSource ?? "first-seen",
-					fetchedAt: now,
-					metadata: {
-						...old,
-						collection: env.INSTAGRAM_COLLECTION,
-						caption: finalCaption,
-						captionSource: visible
-							? "visible-caption-span"
-							: (old?.captionSource ?? "metadata-caption"),
-						authorComments: comments,
-						authorLinks: links,
-						authorCommentsComplete: false,
-					},
+					await post
+						.locator("main time[datetime],article h1")
+						.first()
+						.waitFor({ timeout: 5000 })
+						.catch(() => undefined);
+					const metadata =
+						(await post
+							.locator('meta[property="og:description"]')
+							.getAttribute("content")
+							.catch(() => null)) ?? "";
+					const author = await post
+						.locator('main a[href^="/"]')
+						.evaluateAll(
+							(links) =>
+								links
+									.map((link) =>
+										link.getAttribute("href")?.split("/").filter(Boolean),
+									)
+									.find(
+										(parts) =>
+											parts?.length === 1 &&
+											!["explore", "accounts", "reels"].includes(parts[0]!),
+									)?.[0] ?? "",
+						);
+					const extracted = await post.evaluate(readStandalonePostDom, {
+						author,
+						origin: "https://www.instagram.com",
+					});
+					const caption =
+						extracted.caption ||
+						metadata.match(/:\s*["“]([\s\S]*)[”"]\s*$/u)?.[1] ||
+						"";
+					if (!caption) {
+						warnings.push("A post did not supply a readable caption");
+						return;
+					}
+					const externalId = new URL(url).pathname
+						.split("/")
+						.filter(Boolean)
+						.at(-1)!;
+					const now = new Date().toISOString();
+					const existing = await readDocument(
+						env,
+						identity("instagram", account, externalId),
+					);
+					const old = existing?.metadata;
+					const visible = Boolean(extracted.caption);
+					const finalCaption =
+						!visible && old?.captionSource === "visible-caption-span"
+							? String(old.caption)
+							: caption;
+					const links = [
+						...new Set([
+							...(Array.isArray(old?.authorLinks)
+								? (old.authorLinks as string[])
+								: []),
+							...extracted.links,
+						]),
+					];
+					const comments = [
+						...new Set([
+							...(Array.isArray(old?.authorComments)
+								? old.authorComments.filter(
+										(v): v is string => typeof v === "string",
+									)
+								: []),
+							...extracted.comments,
+						]),
+					];
+					const text = [
+						finalCaption,
+						...comments,
+						links.length ? `Author links: ${links.join("\n")}` : "",
+					]
+						.filter(Boolean)
+						.join("\n\n");
+					documents.push({
+						id: identity("instagram", account, externalId),
+						source: "instagram",
+						account,
+						externalId,
+						url,
+						title: text.slice(0, 180),
+						author,
+						text,
+						publishedAt: extracted.publishedAt || existing?.publishedAt || null,
+						publishedAtSource: extracted.publishedAt
+							? "time-element"
+							: (existing?.publishedAtSource ?? null),
+						savedAt: existing?.savedAt ?? now,
+						savedAtSource: existing?.savedAtSource ?? "first-seen",
+						fetchedAt: now,
+						metadata: {
+							...old,
+							collection: env.INSTAGRAM_COLLECTION,
+							caption: finalCaption,
+							captionSource: visible
+								? "visible-caption-span"
+								: (old?.captionSource ?? "metadata-caption"),
+							authorComments: comments,
+							authorLinks: links,
+							authorCommentsComplete: false,
+						},
+					});
 				});
 			} finally {
 				await post.close();
 			}
 		}
-		const next = offset + 2;
+		const next = Math.min(offset + 1, endOffset);
 		return {
 			documents,
-			state: { urls, offset: next },
-			more: next < urls.length,
+			state: {
+				urls,
+				offset: next,
+				endOffset,
+				collectionUrl: state.collectionUrl,
+			},
+			more: next < endOffset,
+			coverage: {
+				kind: "instagram-bounded",
+				discoveredBacklog: urls.length,
+				remainingItems: Math.max(0, urls.length - next),
+			},
 			partial: true,
 			warnings,
 		};

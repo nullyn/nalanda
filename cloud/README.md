@@ -83,11 +83,24 @@ D1's free per-invocation query budget.
 X captures ordinary authenticated web Bookmarks responses through Playwright.
 It keeps a page cursor between job steps and stops on a fully known page. A
 `maxPages` cap explicitly reports partial coverage; the next request resumes its
-checkpoint instead of restarting that capped scan. Instagram reads the configured
-collection's currently loaded post links and captures two posts per browser step;
-its bounded scan reports **partial** coverage, not an assertion that the whole
-collection was scanned. Complete Instagram collection pagination is not yet
-implemented. GitHub's cloud adapter reads public stars and READMEs via GitHub's
+checkpoint instead of restarting that capped scan. Instagram verifies the configured collection's link and performs up to five bounded
+scroll passes, retaining at most 250 discovered links. Already captured/staged
+items are skipped during discovery. It processes one pending post per browser
+step and keeps the complete discovered backlog in D1 across capped or failed jobs.
+`maxItems` limits each run; it does not truncate the backlog. `result.coverage`
+reports discovered backlog and remaining items. Coverage is always **partial**:
+there is no guarantee of complete collection pagination or discovery.
+
+Instagram diagnostics identify `open-saved`, `verify-account`, `open-collection`,
+`discover-posts` or `read-post`. Detected login pages, challenges and account
+mismatches stop without automatic retries. Daily cron leaves a renewal-required
+job stopped. After the owner signs in and an authorized operator updates
+`INSTAGRAM_SESSION_COOKIES`, call `nalanda_sync` for Instagram with
+`sessionRenewed: true`. This explicitly resumes the job; it does not log in or
+update cookies itself. No export-import recovery is configured. UI/network
+failures remain bounded retries with stage diagnostics.
+
+GitHub's cloud adapter reads public stars and READMEs via GitHub's
 free API; private repository refresh is not supported without separately scoped
 GitHub authorization. Previously captured private content remains in the archive.
 

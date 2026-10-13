@@ -621,3 +621,64 @@ test("GitHub errors distinguish invalid stars, network failures and README HTTP 
 		globalThis.fetch = original;
 	}
 });
+
+test("Instagram resume keeps the whole discovered backlog when a run has a smaller item budget", async () => {
+	const urls = Array.from(
+		{ length: 12 },
+		(_, i) => `https://www.instagram.com/p/saved${i}/`,
+	);
+	const previous = crypto.randomUUID();
+	await env.DB.prepare(
+		"INSERT INTO jobs(id,source,status,state_json,result_json,created_at,updated_at) VALUES(?,'instagram','failed',?,'{}',?,?)",
+	)
+		.bind(
+			previous,
+			JSON.stringify({ urls, offset: 2, maxPages: 5, maxItems: 10 }),
+			"2026-10-13T00:00:00Z",
+			"2026-10-13T00:00:00Z",
+		)
+		.run();
+	const job = await startJob(env, "instagram", { maxPages: 2, maxItems: 2 });
+	const row = await env.DB.prepare("SELECT state_json FROM jobs WHERE id=?")
+		.bind(job.id)
+		.first<{ state_json: string }>();
+	assert.ok(row);
+	const state = JSON.parse(row.state_json);
+	assert.equal(state.urls.length, 12);
+	assert.equal(state.offset, 2);
+	assert.equal(state.endOffset, 4);
+});
+
+test("Instagram session failures stay stopped until the owner confirms renewal", async () => {
+	await env.DB.prepare("DELETE FROM jobs WHERE source='instagram'").run();
+	const id = crypto.randomUUID();
+	await env.DB.prepare(
+		"INSERT INTO jobs(id,source,status,state_json,result_json,created_at,updated_at) VALUES(?,'instagram','failed','{}',?,?,?)",
+	)
+		.bind(
+			id,
+			JSON.stringify({
+				failureDetail: {
+					provider: "instagram",
+					stage: "open-saved",
+					reason: "challenge",
+					sessionRenewalRequired: true,
+				},
+			}),
+			"2026-10-13T01:00:00Z",
+			"2026-10-13T01:00:00Z",
+		)
+		.run();
+	const stopped = await startJob(env, "instagram");
+	assert.equal(stopped.id, id);
+	assert.equal(stopped.status, "failed");
+	assert.equal(stopped.sessionRenewalRequired, true);
+	const renewed = await startJob(
+		env,
+		"instagram",
+		{ maxPages: 1, maxItems: 2 },
+		true,
+	);
+	assert.notEqual(renewed.id, id);
+	assert.equal(renewed.status, "queued");
+});
