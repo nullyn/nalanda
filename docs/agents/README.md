@@ -76,6 +76,37 @@ Example MCP arguments, using the exact tool names:
 }
 ```
 
+### Response shape and document IDs
+
+All three sources return their readable content in the same **top-level `text`**
+field. X metadata can be `{}`; do not read post text from `metadata`, `tweet.text`,
+`full_text` or a GitHub-specific README field. Source-specific metadata is optional.
+
+MCP wraps the payload in `content` text blocks containing JSON. Decode that JSON
+before reading `items` or `text`; use `structuredContent` if a client supplies it.
+
+Document IDs are opaque strings. An X ID may look like
+`["x","acct_nullyn","1657612655019061248"]`. Pass the **entire `item.id` string**
+unchanged to `documentId`; do not JSON-parse it into an array, extract the tweet ID,
+reconstruct it, or substitute `externalId`, `passageId` or the source URL.
+Serialize request arguments with a JSON library so embedded quotes remain intact.
+
+```javascript
+const payload = response.structuredContent ?? JSON.parse(
+  response.content.find(block => block.type === "text").text
+);
+// Here response is the search result; a read payload uses payload.text.
+const item = payload.items[0];
+const args = { documentId: item.id, offset: 0, length: 6000 };
+```
+
+A read miss returns `{ "found": false }`, which means the supplied document ID
+was not found, not that the captured post is empty. Inspect the decoded response
+before diagnosing missing content. A successful read returns `text`, `totalLength`
+and `nextOffset`; GitHub READMEs may need more pages, while an X post often fits
+in one. Search can return two passages for the same document: deduplicate by `id`
+when counting or reading distinct posts.
+
 Search modes are `hybrid`, `semantic` and `keyword`; omit `source` to search all
 sources. Source values are `x`, `instagram` and `github`. Optional `account`
 filters must match the values returned by status. Search returns `items`,
